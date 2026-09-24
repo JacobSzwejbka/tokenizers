@@ -2,21 +2,9 @@ use std::ffi::{CStr, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "json")]
 use serde_json::Value;
-#[cfg(feature = "json")]
-use tk_encode_json::pipeline::{
-    EncodeOptions, Override, PipelineModel, PipelineTokenizer as JsonTokenizer,
-};
-#[cfg(feature = "tok")]
-use tk_encode_tok::pipeline::PipelineTokenizer as TokTokenizer;
-#[cfg(feature = "tok")]
-use tk_serialization::{AddedEntry, Entry, TokFile, added_flag, kind};
+use tk_encode::pipeline::{EncodeOptions, Override, PipelineModel, PipelineTokenizer};
 
-#[cfg(not(any(feature = "json", feature = "tok")))]
-compile_error!("enable at least one of the `json` or `tok` features");
-
-#[cfg(feature = "json")]
 const BYTE_LEVEL_FLAG: u32 = 1 << 2;
 
 struct TokenRecord {
@@ -31,39 +19,20 @@ struct Metadata {
     bos: Option<u32>,
     eos: Option<u32>,
     flags: u32,
-    native_decoder: bool,
-}
-
-enum Backend {
-    #[cfg(feature = "json")]
-    Json(JsonTokenizer),
-    #[cfg(feature = "tok")]
-    Tok {
-        tokenizer: Box<TokTokenizer>,
-        _file: TokFile,
-    },
 }
 
 struct Handle {
-    backend: Backend,
+    tokenizer: PipelineTokenizer,
     metadata: Metadata,
 }
 
 impl Handle {
     fn load(path: &Path) -> Result<Self, ()> {
-        match path.extension().and_then(|extension| extension.to_str()) {
-            #[cfg(feature = "json")]
-            Some("json") => Self::load_json(path),
-            #[cfg(feature = "tok")]
-            Some("tok") => Self::load_tok(path),
-            _ => Err(()),
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            return Err(());
         }
-    }
-
-    #[cfg(feature = "json")]
-    fn load_json(path: &Path) -> Result<Self, ()> {
-        let canonical = tk_convert_json::canonicalize_file(path).map_err(|_| ())?;
-        let tokenizer = tk_serialize_json::from_json(&canonical).map_err(|_| ())?;
+        let canonical = tk_convert::canonicalize_file(path).map_err(|_| ())?;
+        let tokenizer = tk_serialize::from_json(&canonical).map_err(|_| ())?;
         let mut metadata = json_metadata(&canonical)?;
 
         let post_processor = tokenizer.get_post_processor();
@@ -105,128 +74,54 @@ impl Handle {
             metadata.flags |= BYTE_LEVEL_FLAG;
         }
         Ok(Self {
-            backend: Backend::Json(tokenizer),
+            tokenizer,
             metadata,
         })
     }
 
-    #[cfg(feature = "tok")]
-    fn load_tok(path: &Path) -> Result<Self, ()> {
-        let file = TokFile::open(path).map_err(|_| ())?;
-        let tokenizer = TokTokenizer::from_tok(file.bytes()).map_err(|_| ())?;
-        let reader = file.reader().map_err(|_| ())?;
-        let vocab = reader.require::<Entry>(kind::VOCAB_ENTRY).map_err(|_| ())?;
-        let vocab_slab = reader.require::<u8>(kind::VOCAB_SLAB).map_err(|_| ())?;
-        let added = reader
-            .section::<AddedEntry>(kind::ADDED_ENTRY)
-            .map_err(|_| ())?;
-        let added_slab = reader.section::<u8>(kind::ADDED_SLAB).map_err(|_| ())?;
-        let mut records = Vec::with_capacity(vocab.len() + added.len());
-        for entry in vocab {
-            records.push(TokenRecord {
-                id: entry.id,
-                text: slab_string(vocab_slab, entry.start, entry.len)?,
-                added: false,
-                special: false,
-            });
-        }
-        for entry in added {
-            records.push(TokenRecord {
-                id: entry.id,
-                text: slab_string(added_slab, entry.start, entry.len)?,
-                added: true,
-                special: entry.flags & added_flag::SPECIAL != 0,
-            });
-        }
-        let prefix = reader
-            .section::<u32>(kind::POST_PREFIX)
-            .map_err(|_| ())?
-            .first()
-            .copied();
-        let suffix = reader
-            .section::<u32>(kind::POST_SUFFIX)
-            .map_err(|_| ())?
-            .last()
-            .copied();
-        let flags = reader.config.flags;
-        Ok(Self {
-            backend: Backend::Tok {
-                tokenizer: Box::new(tokenizer),
-                _file: file,
-            },
-            metadata: Metadata {
-                records,
-                bos: prefix,
-                eos: suffix,
-                flags,
-                native_decoder: false,
-            },
-        })
-    }
-
     fn encode(&self, text: &str) -> Result<Vec<u32>, ()> {
-        match &self.backend {
-            #[cfg(feature = "json")]
-            Backend::Json(tokenizer) => {
-                let options = EncodeOptions {
-                    padding: Override::Off,
-                    truncation: Override::Off,
-                    ..EncodeOptions::no_specials()
-                };
-                let mut encodings = tokenizer.encode(text, &options).wait().map_err(|_| ())?;
-                if encodings.len() != 1 {
-                    return Err(());
-                }
-                Ok(encodings
-                    .pop()
-                    .expect("one encoding")
-                    .ids()
-                    .iter()
-                    .map(|token| token.id())
-                    .collect())
-            }
-            #[cfg(feature = "tok")]
-            Backend::Tok { tokenizer, .. } => tokenizer
-                .encode(text, false)
-                .map(|tokens| tokens.into_iter().map(|token| token.id).collect())
-                .map_err(|_| ()),
+        let options = EncodeOptions {
+            padding: Override::Off,
+            truncation: Override::Off,
+            ..EncodeOptions::no_specials()
+        };
+        let mut encodings = self
+            .tokenizer
+            .encode(text, &options)
+            .wait()
+            .map_err(|_| ())?;
+        if encodings.len() != 1 {
+            return Err(());
         }
+        Ok(encodings
+            .pop()
+            .expect("one encoding")
+            .ids()
+            .iter()
+            .map(|token| token.id())
+            .collect())
     }
 
     fn decode(&self, previous: Option<u32>, token: u32, skip_special: bool) -> Result<String, ()> {
-        #[cfg(not(feature = "json"))]
-        let _ = (previous, token, skip_special);
-        match &self.backend {
-            #[cfg(feature = "json")]
-            Backend::Json(tokenizer) => {
-                let current = tokenizer.decode(&[token], skip_special).map_err(|_| ())?;
-                let Some(previous) = previous else {
-                    return Ok(current);
-                };
-                let prefix = tokenizer
-                    .decode(&[previous], skip_special)
-                    .map_err(|_| ())?;
-                let pair = tokenizer
-                    .decode(&[previous, token], skip_special)
-                    .map_err(|_| ())?;
-                Ok(pair.strip_prefix(&prefix).unwrap_or(&current).to_string())
-            }
-            #[cfg(feature = "tok")]
-            Backend::Tok { .. } => Err(()),
-        }
+        let current = self
+            .tokenizer
+            .decode(&[token], skip_special)
+            .map_err(|_| ())?;
+        let Some(previous) = previous else {
+            return Ok(current);
+        };
+        let prefix = self
+            .tokenizer
+            .decode(&[previous], skip_special)
+            .map_err(|_| ())?;
+        let pair = self
+            .tokenizer
+            .decode(&[previous, token], skip_special)
+            .map_err(|_| ())?;
+        Ok(pair.strip_prefix(&prefix).unwrap_or(&current).to_string())
     }
 }
 
-#[cfg(feature = "tok")]
-fn slab_string(slab: &[u8], start: u32, len: u32) -> Result<String, ()> {
-    let start = start as usize;
-    let end = start.checked_add(len as usize).ok_or(())?;
-    std::str::from_utf8(slab.get(start..end).ok_or(())?)
-        .map(str::to_owned)
-        .map_err(|_| ())
-}
-
-#[cfg(feature = "json")]
 fn token_id(records: &[TokenRecord], text: &str) -> Option<u32> {
     records
         .iter()
@@ -234,7 +129,6 @@ fn token_id(records: &[TokenRecord], text: &str) -> Option<u32> {
         .map(|record| record.id)
 }
 
-#[cfg(feature = "json")]
 fn json_metadata(text: &str) -> Result<Metadata, ()> {
     let document: Value = serde_json::from_str(text).map_err(|_| ())?;
     let model = document.get("model").and_then(Value::as_object).ok_or(())?;
@@ -299,11 +193,9 @@ fn json_metadata(text: &str) -> Result<Metadata, ()> {
         bos,
         eos,
         flags: 0,
-        native_decoder: true,
     })
 }
 
-#[cfg(feature = "json")]
 fn value_u32(value: &Value) -> Result<u32, ()> {
     value
         .as_u64()
@@ -311,14 +203,12 @@ fn value_u32(value: &Value) -> Result<u32, ()> {
         .ok_or(())
 }
 
-#[cfg(feature = "json")]
 fn special_token_text(value: &Value) -> Option<&str> {
     value
         .as_str()
         .or_else(|| value.get("content").and_then(Value::as_str))
 }
 
-#[cfg(feature = "json")]
 fn sidecar_special_tokens(path: &Path) -> (Option<String>, Option<String>) {
     let mut bos = None;
     let mut eos = None;
@@ -350,10 +240,10 @@ fn candidate_paths(path: &Path) -> Vec<PathBuf> {
     if !path.is_dir() {
         return vec![path.to_owned()];
     }
-    vec![path.join("tokenizer.json"), path.join("tokenizer.tok")]
+    vec![path.join("tokenizer.json")]
 }
 
-/// Create a tokenizer from a `tokenizer.json`, `.tok`, or directory containing one.
+/// Create a tokenizer from a `tokenizer.json` or directory containing one.
 ///
 /// # Safety
 ///
@@ -428,7 +318,7 @@ pub unsafe extern "C" fn tokenizers_hf_encode(
 /// Decode one token with optional previous-token context into caller-owned byte storage.
 ///
 /// `has_previous == 0` ignores `previous`. The return value is the required byte count, or -1
-/// when this backend has no serialized decoder (the `.tok` format) or decoding fails.
+/// when decoding fails.
 ///
 /// # Safety
 ///
@@ -583,26 +473,6 @@ pub unsafe extern "C" fn tokenizers_hf_config_flags(opaque: *const c_void) -> u3
     .unwrap_or(u32::MAX)
 }
 
-/// Return whether the loaded format carries a decoder, or -1 for an invalid handle.
-///
-/// # Safety
-///
-/// `opaque` must be null or a live handle returned by [`tokenizers_hf_create`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tokenizers_hf_has_native_decoder(opaque: *const c_void) -> i32 {
-    catch_unwind(AssertUnwindSafe(|| {
-        if opaque.is_null() {
-            return -1;
-        }
-        i32::from(
-            (unsafe { &*opaque.cast::<Handle>() })
-                .metadata
-                .native_decoder,
-        )
-    }))
-    .unwrap_or(-1)
-}
-
 /// Destroy a tokenizer handle.
 ///
 /// # Safety
@@ -660,7 +530,6 @@ mod tests {
         output
     }
 
-    #[cfg(feature = "json")]
     const TEST_JSON: &str = r#"{
       "version": "2.0",
       "role_to_token": {"bos_token": "<s>", "eos_token": "</s>"},
@@ -677,7 +546,6 @@ mod tests {
       "truncation": null
     }"#;
 
-    #[cfg(feature = "json")]
     #[test]
     fn loads_encodes_and_decodes_json() {
         let path = temp_path("json");
@@ -686,8 +554,6 @@ mod tests {
             assert_eq!(encoded(handle, b"abab"), [3]);
             assert_eq!(unsafe { tokenizers_hf_token_count(handle) }, 6);
             assert_eq!(unsafe { tokenizers_hf_config_flags(handle) }, 0);
-            assert_eq!(unsafe { tokenizers_hf_has_native_decoder(handle) }, 1);
-
             let mut token = 0;
             assert_eq!(
                 unsafe { tokenizers_hf_post_token(handle, 0, &mut token) },
@@ -711,72 +577,6 @@ mod tests {
                 required
             );
             assert_eq!(output, b"abab");
-        });
-    }
-
-    #[cfg(feature = "tok")]
-    fn test_tok_image() -> Vec<u8> {
-        use tk_serialization::{Config, Writer, model, pretok, strings};
-
-        let config = Config {
-            model: model::WORDLEVEL,
-            model_param: 0,
-            pretok: pretok::NONE,
-            pretok_param: 0,
-            flags: 0,
-            _pad0: 0,
-            added_first: [1 << (b'<' & 63), 0, 0, 0],
-        };
-        let vocab_slab = b"<unk>hello";
-        let vocab = [
-            Entry {
-                start: 0,
-                len: 5,
-                id: 0,
-            },
-            Entry {
-                start: 5,
-                len: 5,
-                id: 1,
-            },
-        ];
-        let added_slab = b"<s>";
-        let added = [AddedEntry {
-            start: 0,
-            len: 3,
-            id: 2,
-            flags: added_flag::SPECIAL,
-        }];
-        let mut model_strings = Vec::new();
-        strings::push(&mut model_strings, "<unk>");
-        strings::push(&mut model_strings, "");
-        strings::push(&mut model_strings, "");
-
-        let mut writer = Writer::new();
-        writer.push_one(kind::CONFIG, &config);
-        writer.push(kind::VOCAB_SLAB, vocab_slab);
-        writer.push(kind::VOCAB_ENTRY, &vocab);
-        writer.push(kind::ADDED_SLAB, added_slab);
-        writer.push(kind::ADDED_ENTRY, &added);
-        writer.push(kind::POST_PREFIX, &[2u32]);
-        writer.push(kind::POST_SUFFIX, &[2u32]);
-        writer.push(kind::MODEL_STRINGS, &model_strings);
-        writer.finish()
-    }
-
-    #[cfg(feature = "tok")]
-    #[test]
-    fn loads_and_encodes_tok() {
-        let path = temp_path("tok");
-        std::fs::write(&path, test_tok_image()).unwrap();
-        with_handle(&path, |handle| {
-            assert_eq!(encoded(handle, b"hello"), [1]);
-            assert_eq!(unsafe { tokenizers_hf_token_count(handle) }, 3);
-            assert_eq!(unsafe { tokenizers_hf_has_native_decoder(handle) }, 0);
-            assert_eq!(
-                unsafe { tokenizers_hf_decode(handle, 0, 0, 1, 0, std::ptr::null_mut(), 0) },
-                -1
-            );
         });
     }
 

@@ -22,7 +22,6 @@ namespace {
 
 constexpr uint32_t kByteLevelFlag = 1U << 2;
 uint32_t g_config_flags = kByteLevelFlag;
-bool g_native_decoder = false;
 bool g_use_known_eos = true;
 
 struct TokenRecord {
@@ -38,16 +37,16 @@ const std::array<TokenRecord, 4> kRecords = {
      {3, "hello", false, false},
      {4, "\xC4\xA0world", false, false}}};
 
-class TemporaryTokFile {
+class TemporaryTokenizerFile {
  public:
-  TemporaryTokFile()
+  TemporaryTokenizerFile()
       : path_(
             std::filesystem::temp_directory_path() /
-            "pytorch-tokenizers-rust-adapter-test.tok") {
+            "pytorch-tokenizers-rust-adapter-test.json") {
     std::ofstream(path_).put('\0');
   }
 
-  ~TemporaryTokFile() {
+  ~TemporaryTokenizerFile() {
     std::error_code error;
     std::filesystem::remove(path_, error);
   }
@@ -140,10 +139,6 @@ uint32_t tokenizers_hf_config_flags(const void*) {
   return g_config_flags;
 }
 
-int32_t tokenizers_hf_has_native_decoder(const void*) {
-  return g_native_decoder;
-}
-
 void tokenizers_hf_destroy(void* handle) {
   delete static_cast<uint8_t*>(handle);
 }
@@ -155,9 +150,8 @@ namespace {
 
 TEST(RustHFTokenizerTest, PreservesIndependentBosAndEosCounts) {
   g_config_flags = kByteLevelFlag;
-  g_native_decoder = false;
   g_use_known_eos = true;
-  TemporaryTokFile file;
+  TemporaryTokenizerFile file;
   RustHFTokenizer tokenizer;
   ASSERT_EQ(tokenizer.load(file.string()), Error::Ok);
   EXPECT_EQ(tokenizer.bos_tok(), 1);
@@ -174,9 +168,8 @@ TEST(RustHFTokenizerTest, PreservesIndependentBosAndEosCounts) {
 
 TEST(RustHFTokenizerTest, DecodesByteLevelPieces) {
   g_config_flags = kByteLevelFlag;
-  g_native_decoder = false;
   g_use_known_eos = true;
-  TemporaryTokFile file;
+  TemporaryTokenizerFile file;
   RustHFTokenizer tokenizer;
   ASSERT_EQ(tokenizer.load(file.string()), Error::Ok);
 
@@ -189,11 +182,10 @@ TEST(RustHFTokenizerTest, DecodesByteLevelPieces) {
   EXPECT_TRUE(skipped->empty());
 }
 
-TEST(RustHFTokenizerTest, UsesNativeDecoderForJson) {
+TEST(RustHFTokenizerTest, UsesRustDecoderForNonByteLevelJson) {
   g_config_flags = 0;
-  g_native_decoder = true;
   g_use_known_eos = true;
-  TemporaryTokFile file;
+  TemporaryTokenizerFile file;
   RustHFTokenizer tokenizer;
   ASSERT_EQ(tokenizer.load(file.string()), Error::Ok);
 
@@ -205,22 +197,10 @@ TEST(RustHFTokenizerTest, UsesNativeDecoderForJson) {
   ASSERT_TRUE(skipped.ok());
   EXPECT_TRUE(skipped->empty());
   g_config_flags = kByteLevelFlag;
-  g_native_decoder = false;
 }
 
-TEST(RustHFTokenizerTest, RejectsTokWithoutSupportedDecoder) {
-  g_use_known_eos = true;
-  TemporaryTokFile file;
-  RustHFTokenizer tokenizer;
-  g_config_flags = 0;
-  g_native_decoder = false;
-  EXPECT_EQ(tokenizer.load(file.string()), Error::LoadFailure);
-  EXPECT_FALSE(tokenizer.is_loaded());
-  g_config_flags = kByteLevelFlag;
-}
-
-TEST(RustHFTokenizerTest, RejectsTokWithoutBosOrEosMetadata) {
-  TemporaryTokFile file;
+TEST(RustHFTokenizerTest, RejectsJsonWithoutBosOrEosMetadata) {
+  TemporaryTokenizerFile file;
   RustHFTokenizer tokenizer;
   g_config_flags = kByteLevelFlag;
   g_use_known_eos = false;

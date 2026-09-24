@@ -22,13 +22,6 @@ option(TOKENIZERS_BUILD_PYTHON "Build Python bindings" OFF)
 option(TOKENIZERS_BUILD_HF_RUST_TOKENIZER
        "Build the opt-in Hugging Face Rust tokenizer backend" OFF
 )
-set(TOKENIZERS_HF_RUST_FORMATS
-    "json"
-    CACHE STRING "Rust tokenizer formats: json, tok, or json,tok"
-)
-set_property(
-  CACHE TOKENIZERS_HF_RUST_FORMATS PROPERTY STRINGS json tok "json,tok"
-)
 option(TOKENIZERS_OPTIMIZE_SIZE "Optimize optional tokenizer backends for size"
        OFF
 )

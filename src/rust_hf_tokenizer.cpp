@@ -45,15 +45,13 @@ int32_t tokenizers_hf_token_at(
 int32_t
 tokenizers_hf_post_token(const void* handle, uint8_t suffix, uint32_t* token);
 uint32_t tokenizers_hf_config_flags(const void* handle);
-int32_t tokenizers_hf_has_native_decoder(const void* handle);
 void tokenizers_hf_destroy(void* handle);
 }
 
 namespace tokenizers {
 namespace {
 
-// Mirrors tk_serialization::flag::BYTE_LEVEL. The `.tok` v1 format deliberately
-// keeps these values stable as part of its on-disk schema.
+// Mirrors the byte-level flag returned by the Rust pipeline metadata.
 constexpr uint32_t kByteLevelFlag = 1U << 2;
 
 bool is_bos_token(std::string_view token) {
@@ -149,7 +147,6 @@ Error RustHFTokenizer::load(const std::string& path) {
   has_bos_token_ = false;
   has_eos_token_ = false;
   byte_level_ = false;
-  native_decoder_ = false;
   vocab_size_ = 0;
   bos_tok_ = 0;
   eos_tok_ = 0;
@@ -170,15 +167,6 @@ Error RustHFTokenizer::load(const std::string& path) {
     return Error::ParseFailure;
   }
   byte_level_ = (flags & kByteLevelFlag) != 0;
-  const auto native_decoder = tokenizers_hf_has_native_decoder(handle.get());
-  if (native_decoder < 0) {
-    return Error::ParseFailure;
-  }
-  native_decoder_ = native_decoder != 0;
-  if (!byte_level_ && !native_decoder_) {
-    // The experimental .tok format does not serialize decoder configuration.
-    return Error::LoadFailure;
-  }
 
   const auto metadata_error = load_metadata(handle.get());
   if (metadata_error != Error::Ok) {
@@ -379,7 +367,7 @@ Result<std::string> RustHFTokenizer::decode(
     return Error::Uninitialized;
   }
   if (!byte_level_) {
-    if (!native_decoder_ || token > std::numeric_limits<uint32_t>::max() ||
+    if (token > std::numeric_limits<uint32_t>::max() ||
         prev_token > std::numeric_limits<uint32_t>::max()) {
       return Error::DecodeFailure;
     }

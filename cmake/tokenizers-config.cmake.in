@@ -25,7 +25,7 @@ endif()
 find_dependency(re2 REQUIRED)
 find_dependency(absl REQUIRED)
 
-# The optional .tok backend is a C++ archive with a Rust static-library
+# The optional Hugging Face backend is a C++ archive with a Rust static-library
 # dependency. Define the latter before importing the exported targets when the
 # archive is present. Merely finding the package does not link either target.
 if(WIN32)
