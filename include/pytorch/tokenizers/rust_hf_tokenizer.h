@@ -50,6 +50,8 @@ class RustHFTokenizer final : public Tokenizer {
   std::optional<TokenMap> token_map_;
   std::optional<TokenMap> added_token_map_;
   std::unordered_set<uint64_t> special_token_ids_;
+  bool has_bos_token_ = false;
+  bool has_eos_token_ = false;
   bool byte_level_ = false;
 };
 

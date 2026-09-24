@@ -52,7 +52,6 @@ pub unsafe extern "C" fn tokenizers_hf_encode(
     opaque: *const c_void,
     text: *const u8,
     text_len: usize,
-    add_special_tokens: u8,
     output: *mut u32,
     output_capacity: usize,
 ) -> isize {
@@ -70,7 +69,9 @@ pub unsafe extern "C" fn tokenizers_hf_encode(
             return -1;
         };
 
-        let Ok(tokens) = handle.tokenizer.encode(text, add_special_tokens != 0) else {
+        // The C++ Tokenizer interface controls BOS and EOS independently and
+        // permits repeated tokens, so the adapter applies them after this call.
+        let Ok(tokens) = handle.tokenizer.encode(text, false) else {
             return -1;
         };
         let Ok(token_count) = isize::try_from(tokens.len()) else {
@@ -360,29 +361,21 @@ mod tests {
         with_handle(|handle| {
             let text = b"hello";
             let required = unsafe {
-                tokenizers_hf_encode(
-                    handle,
-                    text.as_ptr(),
-                    text.len(),
-                    1,
-                    std::ptr::null_mut(),
-                    0,
-                )
+                tokenizers_hf_encode(handle, text.as_ptr(), text.len(), std::ptr::null_mut(), 0)
             };
-            assert_eq!(required, 3);
-            let mut output = [0u32; 3];
+            assert_eq!(required, 1);
+            let mut output = [0u32; 1];
             let written = unsafe {
                 tokenizers_hf_encode(
                     handle,
                     text.as_ptr(),
                     text.len(),
-                    1,
                     output.as_mut_ptr(),
                     output.len(),
                 )
             };
-            assert_eq!(written, 3);
-            assert_eq!(output, [2, 1, 2]);
+            assert_eq!(written, 1);
+            assert_eq!(output, [1]);
         });
     }
 

@@ -23,7 +23,6 @@ intptr_t tokenizers_hf_encode(
     const void* handle,
     const uint8_t* text,
     size_t text_len,
-    uint8_t add_special_tokens,
     uint32_t* output,
     size_t output_capacity);
 intptr_t tokenizers_hf_token_count(const void* handle);
@@ -35,10 +34,8 @@ int32_t tokenizers_hf_token_at(
     size_t* text_len,
     uint8_t* is_added,
     uint8_t* is_special);
-int32_t tokenizers_hf_post_token(
-    const void* handle,
-    uint8_t suffix,
-    uint32_t* token);
+int32_t
+tokenizers_hf_post_token(const void* handle, uint8_t suffix, uint32_t* token);
 uint32_t tokenizers_hf_config_flags(const void* handle);
 void tokenizers_hf_destroy(void* handle);
 }
@@ -49,6 +46,19 @@ namespace {
 // Mirrors tk_serialization::flag::BYTE_LEVEL. The `.tok` v1 format deliberately
 // keeps these values stable as part of its on-disk schema.
 constexpr uint32_t kByteLevelFlag = 1U << 2;
+
+bool is_bos_token(std::string_view token) {
+  return token == "<s>" || token == "[CLS]" || token == "<bos>" ||
+      token == "<BOS>" || token == "<|bos|>" || token == "<|begin_of_text|>" ||
+      token == "<|start_of_text|>" || token == "<|startoftext|>" ||
+      token == "<|endoftext|>";
+}
+
+bool is_eos_token(std::string_view token) {
+  return token == "</s>" || token == "[SEP]" || token == "<eos>" ||
+      token == "<EOS>" || token == "<|eos|>" || token == "<|end_of_text|>" ||
+      token == "<|endoftext|>";
+}
 
 std::optional<uint8_t> byte_level_codepoint_to_byte(uint32_t codepoint) {
   if ((codepoint >= 33 && codepoint <= 126) ||
@@ -95,8 +105,7 @@ std::string decode_byte_level(std::string_view piece) {
       return std::string(piece);
     }
     for (size_t offset = 1; offset < length; ++offset) {
-      const auto continuation =
-          static_cast<uint8_t>(piece[index + offset]);
+      const auto continuation = static_cast<uint8_t>(piece[index + offset]);
       if ((continuation & 0xC0) != 0x80) {
         return std::string(piece);
       }
@@ -128,6 +137,8 @@ Error RustHFTokenizer::load(const std::string& path) {
   token_map_.reset();
   added_token_map_.reset();
   special_token_ids_.clear();
+  has_bos_token_ = false;
+  has_eos_token_ = false;
   byte_level_ = false;
   vocab_size_ = 0;
   bos_tok_ = 0;
@@ -148,16 +159,23 @@ Error RustHFTokenizer::load(const std::string& path) {
   if (!handle) {
     return Error::LoadFailure;
   }
-  const auto metadata_error = load_metadata(handle.get());
-  if (metadata_error != Error::Ok) {
-    return metadata_error;
-  }
 
   const auto flags = tokenizers_hf_config_flags(handle.get());
   if (flags == std::numeric_limits<uint32_t>::max()) {
     return Error::ParseFailure;
   }
   byte_level_ = (flags & kByteLevelFlag) != 0;
+  if (!byte_level_) {
+    // The v1 .tok format does not serialize decoder configuration. Loading a
+    // non-byte-level tokenizer would therefore produce raw vocabulary pieces
+    // instead of decoded text.
+    return Error::LoadFailure;
+  }
+
+  const auto metadata_error = load_metadata(handle.get());
+  if (metadata_error != Error::Ok) {
+    return metadata_error;
+  }
 
   handle_ = std::move(handle);
   initialized_ = true;
@@ -188,13 +206,8 @@ Error RustHFTokenizer::load_metadata(const void* handle) {
     uint8_t is_added = 0;
     uint8_t is_special = 0;
     if (tokenizers_hf_token_at(
-            handle,
-            index,
-            &id,
-            &text,
-            &text_len,
-            &is_added,
-            &is_special) != 0 ||
+            handle, index, &id, &text, &text_len, &is_added, &is_special) !=
+            0 ||
         (text == nullptr && text_len != 0)) {
       return Error::ParseFailure;
     }
@@ -219,12 +232,10 @@ Error RustHFTokenizer::load_metadata(const void* handle) {
   added_tokens.reserve(added_ids.size());
   for (auto& record : records) {
     if (record.special) {
-      if (record.text.find("bos") != std::string::npos ||
-          record.text.find("begin") != std::string::npos) {
+      if (is_bos_token(record.text)) {
         bos_candidates.push_back(record.id);
       }
-      if (record.text.find("eos") != std::string::npos ||
-          record.text.find("end") != std::string::npos) {
+      if (is_eos_token(record.text)) {
         eos_candidates.push_back(record.id);
       }
     }
@@ -244,40 +255,36 @@ Error RustHFTokenizer::load_metadata(const void* handle) {
     return token_map.error();
   }
   token_map_.emplace(std::move(*token_map));
-  vocab_size_ = static_cast<int32_t>(
-      token_map_->size() + added_token_map_->size());
+  vocab_size_ =
+      static_cast<int32_t>(token_map_->size() + added_token_map_->size());
 
   uint32_t bos = 0;
   uint32_t eos = 0;
-  const auto bos_status =
-      tokenizers_hf_post_token(handle, 0, &bos);
-  const auto eos_status =
-      tokenizers_hf_post_token(handle, 1, &eos);
+  const auto bos_status = tokenizers_hf_post_token(handle, 0, &bos);
+  const auto eos_status = tokenizers_hf_post_token(handle, 1, &eos);
   if (bos_status < 0 || eos_status < 0) {
     return Error::ParseFailure;
   }
   if (bos_status == 0) {
     bos_tok_ = bos;
+    has_bos_token_ = true;
   }
   if (eos_status == 0) {
     eos_tok_ = eos;
+    has_eos_token_ = true;
   }
-  bool bos_found = bos_status == 0;
-  bool eos_found = eos_status == 0;
-  if (!bos_found || !eos_found) {
-    if (!bos_found && bos_candidates.size() == 1) {
+  if (!has_bos_token_ || !has_eos_token_) {
+    if (!has_bos_token_ && bos_candidates.size() == 1) {
       bos_tok_ = bos_candidates.front();
-      bos_found = true;
+      has_bos_token_ = true;
     }
-    if (!eos_found && eos_candidates.size() == 1) {
+    if (!has_eos_token_ && eos_candidates.size() == 1) {
       eos_tok_ = eos_candidates.front();
-      eos_found = true;
+      has_eos_token_ = true;
     }
   }
-  if (bos_found && !eos_found) {
-    eos_tok_ = bos_tok_;
-  } else if (!bos_found && eos_found) {
-    bos_tok_ = eos_tok_;
+  if (!has_bos_token_ || !has_eos_token_) {
+    return Error::ParseFailure;
   }
   return Error::Ok;
 }
@@ -315,7 +322,11 @@ Result<std::vector<uint64_t>> RustHFTokenizer::encode(
   if (!initialized_) {
     return Error::Uninitialized;
   }
-  if (input.size() > static_cast<size_t>(std::numeric_limits<intptr_t>::max())) {
+  if (input.size() >
+      static_cast<size_t>(std::numeric_limits<intptr_t>::max())) {
+    return Error::EncodeFailure;
+  }
+  if ((bos > 0 && !has_bos_token_) || (eos > 0 && !has_eos_token_)) {
     return Error::EncodeFailure;
   }
 
@@ -324,7 +335,6 @@ Result<std::vector<uint64_t>> RustHFTokenizer::encode(
       handle_.get(),
       reinterpret_cast<const uint8_t*>(input.data()),
       input.size(),
-      static_cast<uint8_t>(bos > 0 || eos > 0),
       output.data(),
       output.size());
   if (count < 0) {
@@ -336,7 +346,6 @@ Result<std::vector<uint64_t>> RustHFTokenizer::encode(
         handle_.get(),
         reinterpret_cast<const uint8_t*>(input.data()),
         input.size(),
-        static_cast<uint8_t>(bos > 0 || eos > 0),
         output.data(),
         output.size());
     if (count < 0 || static_cast<size_t>(count) > output.size()) {
@@ -344,7 +353,14 @@ Result<std::vector<uint64_t>> RustHFTokenizer::encode(
     }
   }
   output.resize(static_cast<size_t>(count));
-  return std::vector<uint64_t>(output.begin(), output.end());
+  const auto bos_count = bos > 0 ? static_cast<size_t>(bos) : 0;
+  const auto eos_count = eos > 0 ? static_cast<size_t>(eos) : 0;
+  std::vector<uint64_t> tokens;
+  tokens.reserve(output.size() + bos_count + eos_count);
+  tokens.insert(tokens.end(), bos_count, bos_tok_);
+  tokens.insert(tokens.end(), output.begin(), output.end());
+  tokens.insert(tokens.end(), eos_count, eos_tok_);
+  return tokens;
 }
 
 Result<std::string> RustHFTokenizer::decode(

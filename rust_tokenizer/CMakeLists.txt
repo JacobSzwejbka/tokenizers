@@ -12,12 +12,8 @@ if(TOKENIZERS_OPTIMIZE_SIZE)
 endif()
 
 set(_cargo_target_dir ${CMAKE_CURRENT_BINARY_DIR}/cargo-target)
-string(
-  CONCAT
-  _rust_library_name
-  ${CMAKE_STATIC_LIBRARY_PREFIX}
-  tokenizers_hf_ffi
-  ${CMAKE_STATIC_LIBRARY_SUFFIX}
+string(CONCAT _rust_library_name ${CMAKE_STATIC_LIBRARY_PREFIX}
+              tokenizers_hf_ffi ${CMAKE_STATIC_LIBRARY_SUFFIX}
 )
 set(_rust_library ${_cargo_target_dir}/${_rust_profile}/${_rust_library_name})
 file(GLOB_RECURSE _rust_sources CONFIGURE_DEPENDS
@@ -28,9 +24,9 @@ add_custom_command(
   OUTPUT ${_rust_library}
   COMMAND
     ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${_cargo_target_dir}
-    CARGO_ENCODED_RUSTFLAGS=-Crelocation-model=pic
-    ${CARGO_EXECUTABLE} build --locked --manifest-path
-    ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml --profile ${_rust_profile}
+    CARGO_ENCODED_RUSTFLAGS=-Crelocation-model=pic ${CARGO_EXECUTABLE} build
+    --locked --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml --profile
+    ${_rust_profile}
   DEPENDS ${_rust_sources} ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml
           ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.lock
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -51,23 +47,19 @@ set_target_properties(
 )
 target_include_directories(
   tokenizers_hf_rust_tokenizer
-  PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
+         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_compile_features(tokenizers_hf_rust_tokenizer PUBLIC cxx_std_17)
-target_link_libraries(
-  tokenizers_hf_rust_tokenizer
-  PRIVATE tokenizers_hf_ffi
-)
+target_link_libraries(tokenizers_hf_rust_tokenizer PRIVATE tokenizers_hf_ffi)
 
 if(APPLE)
   target_link_libraries(tokenizers_hf_rust_tokenizer PRIVATE iconv)
 elseif(UNIX)
   find_package(Threads REQUIRED)
   target_link_libraries(
-    tokenizers_hf_rust_tokenizer
-    PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m rt util
+    tokenizers_hf_rust_tokenizer PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m rt
+                                         util
   )
 endif()
 
