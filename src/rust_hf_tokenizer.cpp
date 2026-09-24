@@ -25,6 +25,14 @@ intptr_t tokenizers_hf_encode(
     size_t text_len,
     uint32_t* output,
     size_t output_capacity);
+intptr_t tokenizers_hf_decode(
+    const void* handle,
+    uint32_t previous,
+    uint8_t has_previous,
+    uint32_t token,
+    uint8_t skip_special,
+    uint8_t* output,
+    size_t output_capacity);
 intptr_t tokenizers_hf_token_count(const void* handle);
 int32_t tokenizers_hf_token_at(
     const void* handle,
@@ -37,6 +45,7 @@ int32_t tokenizers_hf_token_at(
 int32_t
 tokenizers_hf_post_token(const void* handle, uint8_t suffix, uint32_t* token);
 uint32_t tokenizers_hf_config_flags(const void* handle);
+int32_t tokenizers_hf_has_native_decoder(const void* handle);
 void tokenizers_hf_destroy(void* handle);
 }
 
@@ -140,22 +149,18 @@ Error RustHFTokenizer::load(const std::string& path) {
   has_bos_token_ = false;
   has_eos_token_ = false;
   byte_level_ = false;
+  native_decoder_ = false;
   vocab_size_ = 0;
   bos_tok_ = 0;
   eos_tok_ = 0;
 
-  std::string tokenizer_tok = path;
   std::error_code fs_error;
-  if (fs::is_directory(path, fs_error)) {
-    const fs::path root(path);
-    tokenizer_tok = (root / "tokenizer.tok").string();
-  }
-  if (fs_error || !fs::exists(tokenizer_tok, fs_error) || fs_error) {
+  if (!fs::exists(path, fs_error) || fs_error) {
     return Error::LoadFailure;
   }
 
   std::unique_ptr<void, RustHandleDeleter> handle(
-      tokenizers_hf_create(tokenizer_tok.c_str()));
+      tokenizers_hf_create(path.c_str()));
   if (!handle) {
     return Error::LoadFailure;
   }
@@ -165,10 +170,13 @@ Error RustHFTokenizer::load(const std::string& path) {
     return Error::ParseFailure;
   }
   byte_level_ = (flags & kByteLevelFlag) != 0;
-  if (!byte_level_) {
-    // The v1 .tok format does not serialize decoder configuration. Loading a
-    // non-byte-level tokenizer would therefore produce raw vocabulary pieces
-    // instead of decoded text.
+  const auto native_decoder = tokenizers_hf_has_native_decoder(handle.get());
+  if (native_decoder < 0) {
+    return Error::ParseFailure;
+  }
+  native_decoder_ = native_decoder != 0;
+  if (!byte_level_ && !native_decoder_) {
+    // The experimental .tok format does not serialize decoder configuration.
     return Error::LoadFailure;
   }
 
@@ -364,12 +372,44 @@ Result<std::vector<uint64_t>> RustHFTokenizer::encode(
 }
 
 Result<std::string> RustHFTokenizer::decode(
-    uint64_t /*prev_token*/,
+    uint64_t prev_token,
     uint64_t token,
     bool skip_special_tokens) const {
   if (!initialized_) {
     return Error::Uninitialized;
   }
+  if (!byte_level_) {
+    if (!native_decoder_ || token > std::numeric_limits<uint32_t>::max() ||
+        prev_token > std::numeric_limits<uint32_t>::max()) {
+      return Error::DecodeFailure;
+    }
+    auto count = tokenizers_hf_decode(
+        handle_.get(),
+        static_cast<uint32_t>(prev_token),
+        prev_token != 0,
+        static_cast<uint32_t>(token),
+        skip_special_tokens,
+        nullptr,
+        0);
+    if (count < 0) {
+      return Error::DecodeFailure;
+    }
+    std::string decoded(static_cast<size_t>(count), '\0');
+    count = tokenizers_hf_decode(
+        handle_.get(),
+        static_cast<uint32_t>(prev_token),
+        prev_token != 0,
+        static_cast<uint32_t>(token),
+        skip_special_tokens,
+        reinterpret_cast<uint8_t*>(decoded.data()),
+        decoded.size());
+    if (count < 0 || static_cast<size_t>(count) > decoded.size()) {
+      return Error::DecodeFailure;
+    }
+    decoded.resize(static_cast<size_t>(count));
+    return decoded;
+  }
+
   std::string_view piece;
   if (auto regular = token_map_->tryGetString(token)) {
     piece = *regular;
@@ -382,9 +422,6 @@ Result<std::string> RustHFTokenizer::decode(
     return Error::DecodeFailure;
   }
 
-  if (!byte_level_) {
-    return std::string(piece);
-  }
   return decode_byte_level(piece);
 }
 

@@ -6,6 +6,15 @@
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 
+if(NOT TOKENIZERS_HF_RUST_FORMATS STREQUAL "json"
+   AND NOT TOKENIZERS_HF_RUST_FORMATS STREQUAL "tok"
+   AND NOT TOKENIZERS_HF_RUST_FORMATS STREQUAL "json,tok"
+)
+  message(
+    FATAL_ERROR "TOKENIZERS_HF_RUST_FORMATS must be json, tok, or json,tok"
+  )
+endif()
+
 set(_rust_profile release)
 if(TOKENIZERS_OPTIMIZE_SIZE)
   set(_rust_profile minsize)
@@ -25,7 +34,8 @@ add_custom_command(
   COMMAND
     ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${_cargo_target_dir}
     CARGO_ENCODED_RUSTFLAGS=-Crelocation-model=pic ${CARGO_EXECUTABLE} build
-    --locked --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml --profile
+    --locked --no-default-features --features ${TOKENIZERS_HF_RUST_FORMATS}
+    --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml --profile
     ${_rust_profile}
   DEPENDS ${_rust_sources} ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml
           ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.lock

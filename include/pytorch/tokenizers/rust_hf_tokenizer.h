@@ -53,6 +53,7 @@ class RustHFTokenizer final : public Tokenizer {
   bool has_bos_token_ = false;
   bool has_eos_token_ = false;
   bool byte_level_ = false;
+  bool native_decoder_ = false;
 };
 
 } // namespace tokenizers

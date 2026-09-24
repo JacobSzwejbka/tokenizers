@@ -22,6 +22,7 @@ namespace {
 
 constexpr uint32_t kByteLevelFlag = 1U << 2;
 uint32_t g_config_flags = kByteLevelFlag;
+bool g_native_decoder = false;
 bool g_use_known_eos = true;
 
 struct TokenRecord {
@@ -81,6 +82,25 @@ intptr_t tokenizers_hf_encode(
   return encoded.size();
 }
 
+intptr_t tokenizers_hf_decode(
+    const void*,
+    uint32_t,
+    uint8_t,
+    uint32_t token,
+    uint8_t skip_special,
+    uint8_t* output,
+    size_t output_capacity) {
+  const std::string decoded =
+      skip_special != 0 && token == 2 ? "" : "decoded world";
+  if (output_capacity < decoded.size()) {
+    return decoded.size();
+  }
+  if (!decoded.empty()) {
+    std::copy(decoded.begin(), decoded.end(), output);
+  }
+  return decoded.size();
+}
+
 intptr_t tokenizers_hf_token_count(const void*) {
   return kRecords.size();
 }
@@ -120,6 +140,10 @@ uint32_t tokenizers_hf_config_flags(const void*) {
   return g_config_flags;
 }
 
+int32_t tokenizers_hf_has_native_decoder(const void*) {
+  return g_native_decoder;
+}
+
 void tokenizers_hf_destroy(void* handle) {
   delete static_cast<uint8_t*>(handle);
 }
@@ -131,6 +155,7 @@ namespace {
 
 TEST(RustHFTokenizerTest, PreservesIndependentBosAndEosCounts) {
   g_config_flags = kByteLevelFlag;
+  g_native_decoder = false;
   g_use_known_eos = true;
   TemporaryTokFile file;
   RustHFTokenizer tokenizer;
@@ -149,6 +174,7 @@ TEST(RustHFTokenizerTest, PreservesIndependentBosAndEosCounts) {
 
 TEST(RustHFTokenizerTest, DecodesByteLevelPieces) {
   g_config_flags = kByteLevelFlag;
+  g_native_decoder = false;
   g_use_known_eos = true;
   TemporaryTokFile file;
   RustHFTokenizer tokenizer;
@@ -163,11 +189,31 @@ TEST(RustHFTokenizerTest, DecodesByteLevelPieces) {
   EXPECT_TRUE(skipped->empty());
 }
 
+TEST(RustHFTokenizerTest, UsesNativeDecoderForJson) {
+  g_config_flags = 0;
+  g_native_decoder = true;
+  g_use_known_eos = true;
+  TemporaryTokFile file;
+  RustHFTokenizer tokenizer;
+  ASSERT_EQ(tokenizer.load(file.string()), Error::Ok);
+
+  auto decoded = tokenizer.decode(3, 4);
+  ASSERT_TRUE(decoded.ok());
+  EXPECT_EQ(*decoded, "decoded world");
+
+  auto skipped = tokenizer.decode(4, 2, true);
+  ASSERT_TRUE(skipped.ok());
+  EXPECT_TRUE(skipped->empty());
+  g_config_flags = kByteLevelFlag;
+  g_native_decoder = false;
+}
+
 TEST(RustHFTokenizerTest, RejectsTokWithoutSupportedDecoder) {
   g_use_known_eos = true;
   TemporaryTokFile file;
   RustHFTokenizer tokenizer;
   g_config_flags = 0;
+  g_native_decoder = false;
   EXPECT_EQ(tokenizer.load(file.string()), Error::LoadFailure);
   EXPECT_FALSE(tokenizer.is_loaded());
   g_config_flags = kByteLevelFlag;
